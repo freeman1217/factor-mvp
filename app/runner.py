@@ -1,125 +1,59 @@
 import os
 import pandas as pd
-
-from data import load_market_data
+from app_data import load_market_data
 from factors import build_factors
 from signals import generate_signals
 from portfolio import build_portfolio
 from backtest import BacktestEngine, calculate_performance
 
 
-DATA_DIR = "data"
-OUTPUT_DIR = "output"
-
-
-def run_pipeline():
-
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    print("=" * 60)
-    print("Taiwan Stock Quantitative Investment System")
-    print("=" * 60)
-
-    # 1. DATA
-    print("\n[1/6] Loading market data...")
-
+def run_pipeline(
+    price_path="data/prices.csv",
+    fundamental_path="data/fundamentals.csv",
+    institutional_path="data/institutional.csv",
+    dividend_path="data/dividends.csv",
+    top_n=20,
+    initial_capital=1_000_000
+):
+    """台股智慧因子投資系統：主執行管線"""
+    
+    print("🚀 [1/5] 載入並串接 Point-in-Time 市場與財報資料...")
     df = load_market_data(
-        price_path=f"{DATA_DIR}/prices.csv",
-        fundamental_path=f"{DATA_DIR}/fundamentals.csv",
-        institutional_path=f"{DATA_DIR}/institutional.csv",
-        dividend_path=f"{DATA_DIR}/dividends.csv"
+        price_path=price_path,
+        fundamental_path=fundamental_path,
+        institutional_path=institutional_path,
+        dividend_path=dividend_path
     )
 
-    print(f"Loaded {len(df)} records.")
-
-    # 2. FACTORS
-    print("\n[2/6] Calculating factors...")
-
+    print("📊 [2/5] 計算五大因子與橫斷面 Z-score...")
     df = build_factors(df)
 
-    # 3. SIGNALS
-    print("\n[3/6] Generating signals...")
-
+    print("🎯 [3/5] 生成多因子合成分數與股票排名...")
     df = generate_signals(df)
 
-    # 4. PORTFOLIO
-    print("\n[4/6] Building portfolio...")
+    print("💼 [4/5] 建構月調倉等權重投資組合...")
+    portfolio = build_portfolio(df, top_n=top_n)
 
-    portfolio = build_portfolio(
-        df,
-        top_n=20
-    )
+    print("📈 [5/5] 執行歷史回測與交易成本核算...")
+    engine = BacktestEngine(initial_capital=initial_capital)
+    backtest_result = engine.run(df, portfolio)
 
-    if portfolio.empty:
-        raise ValueError(
-            "No portfolio holdings generated."
-        )
+    # 計算統計績效
+    stats = calculate_performance(backtest_result)
 
-    # 5. BACKTEST
-    print("\n[5/6] Running backtest...")
+    print("\n" + "=" * 40)
+    print("🏆 【台股智慧因子策略 - 樣本外績效報告】")
+    print("=" * 40)
+    for k, v in stats.items():
+        if "Return" in k or "Volatility" in k or "Drawdown" in k:
+            print(f" - {k:<18}: {v:>8.2%}")
+        else:
+            print(f" - {k:<18}: {v:>8.2f}")
+    print("=" * 40 + "\n")
 
-    engine = BacktestEngine(
-        initial_capital=1_000_000,
-        commission=0.001425,
-        transaction_tax=0.003
-    )
-
-    backtest = engine.run(
-        prices=df[["date", "ticker", "close"]],
-        portfolio=portfolio
-    )
-
-    performance = calculate_performance(backtest)
-
-    # 6. REPORT
-    print("\n[6/6] Generating report...")
-
-    df.to_csv(
-        f"{OUTPUT_DIR}/factor_data.csv",
-        index=False
-    )
-
-    portfolio.to_csv(
-        f"{OUTPUT_DIR}/portfolio.csv",
-        index=False
-    )
-
-    backtest.to_csv(
-        f"{OUTPUT_DIR}/backtest.csv"
-    )
-
-    report = pd.DataFrame(
-        performance.items(),
-        columns=["Metric", "Value"]
-    )
-
-    report.to_csv(
-        f"{OUTPUT_DIR}/performance.csv",
-        index=False
-    )
-
-    print("\n" + "=" * 60)
-    print("BACKTEST PERFORMANCE")
-    print("=" * 60)
-
-    for metric, value in performance.items():
-
-        print(
-            f"{metric:25s}: {value:.4%}"
-            if pd.notna(value)
-            else f"{metric:25s}: N/A"
-        )
-
-    print("\nPipeline completed successfully.")
-
-    return {
-        "data": df,
-        "portfolio": portfolio,
-        "backtest": backtest,
-        "performance": performance
-    }
+    return backtest_result, stats
 
 
 if __name__ == "__main__":
+    # 若資料檔存在則直接執行回測
     run_pipeline()
-
