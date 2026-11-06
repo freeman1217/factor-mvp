@@ -1,108 +1,56 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
+
 
 def get_rebalance_dates(df):
-    """Get the last available trading day of each month."""
+    """取得資料集內每個月最後一個交易日"""
+    dates = pd.to_datetime(df["date"]).drop_duplicates().sort_values()
+    return dates.groupby(dates.dt.to_period("M")).max().tolist()
 
-    dates = pd.to_datetime(df["date"].drop_duplicates())
 
-    calendar = pd.DataFrame({"date": dates})
-
-    calendar["month"] = calendar["date"].dt.to_period("M")
-
-    rebalance_dates = (
-        calendar.groupby("month")["date"]
-        .max()
-        .sort_values()
-        .tolist()
-    )
-
-    return rebalance_dates
-
-def build_portfolio(
-    df,
-    top_n=20,
-    min_score=None
-):
+def build_portfolio(df, top_n=20, min_score=None):
     """
-    Monthly equal-weight portfolio.
-    Signals are generated using data available at each rebalance date.
+    月調倉等權重投資組合建構（全向量化優化版）
     """
-
     df = df.copy()
-
     df["date"] = pd.to_datetime(df["date"])
 
+    # 1. 批次篩選出所有調倉日且訊號非 NaN 的資料
     rebalance_dates = get_rebalance_dates(df)
+    reb_df = df[df["date"].isin(rebalance_dates)].dropna(subset=["signal_score"])
 
-    portfolios = []
+    # 2. 分數門檻過濾
+    if min_score is not None:
+        reb_df = reb_df[reb_df["signal_score"] >= min_score]
 
-    for date in rebalance_dates:
-
-        snapshot = df[df["date"] == date].copy()
-
-        snapshot = snapshot.dropna(
-            subset=["signal_score"]
-        )
-
-        if min_score is not None:
-            snapshot = snapshot[
-                snapshot["signal_score"] >= min_score
-            ]
-
-        snapshot = snapshot.sort_values(
-            "signal_score",
-            ascending=False
-        )
-
-        selected = snapshot.head(top_n).copy()
-
-        if selected.empty:
-            continue
-
-        # Equal-weight allocation.
-        selected["weight"] = 1.0 / len(selected)
-
-        selected["rebalance_date"] = date
-
-        portfolios.append(
-            selected[
-                [
-                    "rebalance_date",
-                    "date",
-                    "ticker",
-                    "signal_score",
-                    "signal_rank",
-                    "close",
-                    "weight"
-                ]
-            ]
-        )
-
-    if not portfolios:
-        return pd.DataFrame(
-            columns=[
-                "rebalance_date",
-                "date",
-                "ticker",
-                "signal_score",
-                "signal_rank",
-                "close",
-                "weight"
-            ]
-        )
-
-    result = pd.concat(
-        portfolios,
-        ignore_index=True
+    # 3. 向量化選股：依日期與分數排序後，取每期前 top_n 檔
+    portfolio = (
+        reb_df.sort_values(["date", "signal_score"], ascending=[True, False])
+        .groupby("date", as_index=False)
+        .head(top_n)
+        .copy()
     )
 
-    return result
+    # 若全無選出標的，回傳空的 DataFrame
+    if portfolio.empty:
+        target_cols = ["rebalance_date", "date", "ticker", "signal_score", "signal_rank", "close", "weight"]
+        return pd.DataFrame(columns=[c for c in target_cols if c in df.columns or c in ["rebalance_date", "weight"]])
+
+    # 4. 計算等權重（依每期實際入選檔數平分 1.0）
+    portfolio["weight"] = 1.0 / portfolio.groupby("date")["ticker"].transform("count")
+    portfolio["rebalance_date"] = portfolio["date"]
+
+    # 動態選取存在的欄位，防範 KeyError
+    target_cols = ["rebalance_date", "date", "ticker", "signal_score", "signal_rank", "close", "weight"]
+    valid_cols = [col for col in target_cols if col in portfolio.columns]
+
+    return portfolio[valid_cols].reset_index(drop=True)
 
 
 def get_target_weights(portfolio):
-    """Convert portfolio holdings to target weights."""
-
+    """
+    將投資組合明細轉為目標權重矩陣 (Rebalance Date x Ticker)
+    """
     if portfolio.empty:
         return pd.DataFrame()
 
@@ -113,4 +61,3 @@ def get_target_weights(portfolio):
         aggfunc="sum",
         fill_value=0.0
     ).sort_index()
-
